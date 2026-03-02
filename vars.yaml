@@ -1,0 +1,52 @@
+#ansible-vault "domain"
+domain: domain.name.net 
+
+#ansible-vault "db_name"
+db_name: wordpress
+
+#ansible-vault "wordpress_install_dir"
+wordpress_install_dir: /var/www/html/name_of_web-site
+
+#ansible-vault "db_user"
+db_user: wpuser
+
+#ansible-vault "db_password"
+db_password: Password
+
+#ansible-vault "root_db_password"
+root_db_password: Password
+
+#ansible-vault "wordpress_admin_user"
+wordpress_admin_user: admin
+
+#ansible-vault "wordpress_admin_password"
+wordpress_admin_password: Password
+
+#ansible-vault "wordpress_admin_email"
+wordpress_admin_email: email@email.com
+
+#Change in this file if you need
+remote_wordpress_file: /tmp/latest.tar.gz
+backup_dir: /tmp/wordpress_backup
+
+#Vars for restore from backup;
+wordpress_files_backup: your_backup_file_name.tar.gz  
+wordpress_db_backup: your_db_backup_file_name.sql.gz 
+
+#Vars for sudoers and php install 
+ubuntu_user: ubuntu
+php_version: "8.2"
+php_packages:
+  - "php{{ php_version }}"
+  - "php{{ php_version }}-fpm"
+  - "php{{ php_version }}-mysql"
+  - "php{{ php_version }}-xml"
+  - "php{{ php_version }}-mbstring"
+  - "php{{ php_version }}-curl"
+  - "php{{ php_version }}-zip"
+  - "php{{ php_version }}-gd"
+  - "php{{ php_version }}-exif"
+  - "php{{ php_version }}-fileinfo"
+  - "php{{ php_version }}-imagick"
+  - "php{{ php_version }}-iconv"
+  - "php{{ php_version }}-intl"

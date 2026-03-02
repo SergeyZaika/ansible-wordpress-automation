@@ -1,0 +1,127 @@
+---
+- name: Install Second WordPress Site with Nginx, MariaDB, and PHP
+  hosts: web_sites  # Change for another site
+  become: yes
+
+  tasks:
+    - name: Include variables
+      include_vars:
+        file: vars.yaml
+
+    - name: Include secret variables
+      include_vars:
+        file: "{{ secret_file }}"
+
+    # Create MariaDB database for second site
+    - name: Create MariaDB database for second site
+      community.mysql.mysql_db:
+        name: "{{ db_name }}"
+        state: present
+        login_user: root
+        login_password: "{{ root_db_password }}"
+
+    # Create MariaDB user for second site
+    - name: Create MariaDB user for second site
+      community.mysql.mysql_user:
+        name: "{{ db_user }}"
+        password: "{{ db_password }}"
+        priv: "{{ db_name }}.*:ALL"
+        state: present
+        login_user: root
+        login_password: "{{ root_db_password }}"
+        column_case_sensitive: false
+      notify: Restart MariaDB
+
+    # Ensure second WordPress install directory exists
+    - name: Ensure second WordPress install directory exists
+      file:
+        path: "{{ wordpress_install_dir }}"
+        state: directory
+        owner: www-data
+        group: www-data
+        mode: '0755'
+
+    # Copy WordPress files backup to remote host
+    - name: Copy WordPress files backup to remote host
+      copy:
+        src: "~/backup/{{ domain }}/{{ wordpress_files_backup }}"
+        dest: "/tmp/{{ wordpress_files_backup }}"
+
+    # Copy WordPress database backup to remote host
+    - name: Copy WordPress database backup to remote host
+      copy:
+        src: "~/backup/{{ domain }}/{{ wordpress_db_backup }}"
+        dest: "/tmp/{{ wordpress_db_backup }}"
+
+    # Fail if WordPress files backup is not found
+    - name: Fail if WordPress files backup is not found
+      stat:
+        path: "/tmp/{{ wordpress_files_backup }}"
+      register: files_backup_check
+
+    # Fail if WordPress database backup is not found
+    - name: Fail if WordPress database backup is not found
+      stat:
+        path: "/tmp/{{ wordpress_db_backup }}"
+      register: db_backup_check
+
+    # Unarchive WordPress files backup
+    - name: Unarchive WordPress files backup
+      unarchive:
+        src: "/tmp/{{ wordpress_files_backup }}"
+        dest: "{{ wordpress_install_dir }}"
+        remote_src: yes
+        extra_opts: [ "--strip-components=1" ]
+
+    # Set ownership of WordPress files
+    - name: Set ownership of WordPress files for second site
+      file:
+        path: "{{ wordpress_install_dir }}"
+        owner: www-data
+        group: www-data
+        recurse: yes
+
+    # Check if unarchive was successful
+    - name: Check if WordPress files were extracted for second site
+      stat:
+        path: "{{ wordpress_install_dir }}/index.php"
+      register: files_extraction_check
+
+    - name: Fail if WordPress files were not extracted for second site
+      fail:
+        msg: "Failed to extract WordPress files for the second site from the backup!"
+      when: not files_extraction_check.stat.exists
+
+    # Import the WordPress database backup
+    - name: Import WordPress database backup for the second site
+      shell: >
+        mysql -u {{ db_user }} -p{{ db_password }} {{ db_name }} < /tmp/{{ wordpress_db_backup }}
+      register: import_result
+      changed_when: import_result.rc == 0
+      failed_when: import_result.rc != 0
+
+    # Deploy Nginx configuration for second site
+    - name: Deploy Nginx configuration for second site
+      template:
+        src: templates/nginx_wordpress.j2
+        dest: /etc/nginx/sites-available/{{ domain }}
+      notify: Reload Nginx
+
+    # Create a symbolic link in sites-enabled for second site
+    - name: Create symbolic link for Nginx site configuration for second site
+      file:
+        src: "/etc/nginx/sites-available/{{ domain }}"
+        dest: "/etc/nginx/sites-enabled/{{ domain }}"
+        state: link
+      notify: Reload Nginx
+
+  handlers:
+    - name: Reload Nginx
+      service:
+        name: nginx
+        state: reloaded
+
+    - name: Restart MariaDB
+      service:
+        name: mariadb
+        state: restarted

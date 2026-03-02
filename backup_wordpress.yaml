@@ -1,0 +1,145 @@
+---
+- name: Backup Site
+  hosts: web_sites #Change it for enother site #web_sites AWS_KMSHVSM
+  become: yes
+
+  vars:
+    current_time: "{{ ansible_date_time.date }}_{{ ansible_date_time.time | replace(':', '-') }}"
+
+  tasks:
+    - name: Include variables for the first site
+      include_vars:
+        file: vars.yaml  
+
+    - name: Include secret variables
+      include_vars:
+        file: "{{ secret_file }}"
+
+    - name: Create backup directory if it doesn't exist on remote host
+      file:
+        path: "{{ backup_dir }}"
+        state: directory
+        mode: '0755'
+        owner: root
+        group: root
+
+    - name: Set the backup filenames
+      set_fact:
+        files_backup_name: "{{ domain }}-fs-{{ current_time }}.tar.gz"
+        db_backup_name: "{{ domain }}-db-{{ current_time }}"
+
+    - name: Backup WordPress files
+      archive:
+        path: "{{ wordpress_install_dir }}"
+        dest: "{{ backup_dir }}/{{ files_backup_name }}"
+        format: gz
+        owner: root
+        group: root
+
+    - name: Dump the WordPress database
+      shell: >
+        mysqldump -u {{ db_user }} -p{{ db_password }} {{ db_name }} > {{ backup_dir }}/{{ db_backup_name }}.sql
+      register: dump_result
+      changed_when: dump_result.rc == 0
+      failed_when: dump_result.rc != 0
+
+    - name: Display the first few lines of the SQL dump file
+      command: head -n 20 {{ backup_dir }}/{{ db_backup_name }}.sql
+      register: sql_dump_preview
+      changed_when: false
+
+    - name: Show SQL dump preview
+      debug:
+        var: sql_dump_preview.stdout_lines
+
+    - name: Create backup directory on Ansible host if it doesn't exist
+      local_action:
+        module: file
+        path: "~/backup/{{ domain }}"
+        state: directory
+        mode: '0755'
+
+    - name: List backup files on remote host
+      command: ls -l {{ backup_dir }}
+      register: backup_files_list
+
+    - name: Show backup files list
+      debug:
+        var: backup_files_list.stdout_lines
+
+    - name: Check if swap is already configured
+      command: swapon --show
+      register: swap_status
+      failed_when: false
+
+    - name: Create a 2GB swap file if none exists
+      command: fallocate -l 2G /swapfile
+      when: swap_status.stdout == ''
+      become: yes
+
+    - name: Set the correct permissions on the swap file
+      file:
+        path: /swapfile
+        mode: '0600'
+      when: swap_status.stdout == ''
+      become: yes
+
+    - name: Format the swap file
+      command: mkswap /swapfile
+      when: swap_status.stdout == ''
+      become: yes
+
+    - name: Enable the swap file
+      command: swapon /swapfile
+      when: swap_status.stdout == ''
+      become: yes
+
+    - name: Add swap entry to /etc/fstab for persistence
+      lineinfile:
+        path: /etc/fstab
+        line: '/swapfile swap swap defaults 0 0'
+        create: yes
+      when: swap_status.stdout == ''
+      become: yes
+
+    - name: Verify swap status
+      command: swapon --show
+      become: yes
+
+# Use RCYNC to copy files
+
+    - name: Install rsync on remote host (Debian-based)
+      apt:
+        name: rsync
+        state: present
+
+    - name: Install rsync on remote host
+      apt:
+        name: rsync
+        state: present
+      become: yes
+      
+    - name: Copy files backup to Ansible host using rsync
+      command: >
+        rsync -avz -e "ssh -o StrictHostKeyChecking=no -i {{ ansible_ssh_private_key_file }}" {{ ansible_user }}@{{ inventory_hostname }}:{{ backup_dir }}/{{ files_backup_name }} /home/sergey/backup/{{ domain }}/
+      delegate_to: localhost
+      register: rsync_result
+
+    - name: Show rsync result
+      debug:
+        var: rsync_result
+
+    - name: Copy database backup to Ansible host
+      fetch:
+        src: "{{ backup_dir }}/{{ db_backup_name }}.sql"
+        dest: "~/backup/{{ domain }}/"
+        flat: yes
+
+#    - name: Remove temporary backup directory on remote host
+#      file:
+#       path: "{{ backup_dir }}"
+#        state: absent
+
+    - name: Inform about successful backup
+      debug:
+        msg: "Backup for {{ domain }} completed, stored in ~/backup/{{ domain }} on the Ansible host and the temporary directory has been removed from the remote host."

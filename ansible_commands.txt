@@ -1,0 +1,10 @@
+#ansible-vault encrypt vars_secret.yaml
+#ansible-vault edit vars_secret.yaml
+#ansible-vault edit vars_secret.yaml
+#ansible-vault view vars_secret.yaml
+
+#ansible-playbook install_wordpress.yaml --ask-vault-pass
+ansible-playbook install_wordpress.yaml --vault-password-file ~/.vault_pass.txt
+
+
+ansible-playbook certbot.yaml --vault-password-file ~/ansible/.vault_pass.txt -i ~/ansible/hosts

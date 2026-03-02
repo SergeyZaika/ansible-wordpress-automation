@@ -1,0 +1,242 @@
+---
+- name: Install WordPress with Nginx, MariaDB, and PHP
+  hosts: web_sites
+  become: yes
+
+  tasks:
+    - name: Include variables for the first site
+      include_vars:
+        file: vars.yaml
+
+    - name: Include secret variables
+      include_vars:
+        file: "{{ secret_file }}"
+
+    - name: Update and upgrade APT packages
+      apt:
+        update_cache: yes
+        upgrade: dist
+
+    - name: Install necessary packages
+      apt:
+        name:
+          - nginx
+          - mariadb-server
+          - mariadb-client
+          - software-properties-common
+          - certbot
+          - python3-certbot-nginx
+          - python3-pymysql
+          - unzip
+          - tar
+        state: present
+      notify: Restart Nginx
+
+    - name: Add PHP repository
+      apt_repository:
+        repo: ppa:ondrej/php
+        state: present
+        update_cache: yes
+
+    - name: Install PHP and extensions
+      apt:
+        name: "{{ php_packages }}"
+        state: present
+      notify: Restart PHP-FPM
+
+    - name: Validate and restart MariaDB
+      shell: |
+        sudo systemctl restart mariadb
+        sudo systemctl status mariadb || sudo journalctl -xe
+      register: mariadb_status
+      failed_when: mariadb_status.rc != 0
+
+    - name: Validate and restart PHP-FPM
+      shell: |
+        sudo systemctl restart php{{ php_version }}-fpm
+        sudo systemctl status php{{ php_version }}-fpm || sudo journalctl -xe
+      register: php_fpm_status
+      failed_when: php_fpm_status.rc != 0
+
+    - name: Create basic Nginx configuration
+      template:
+        src: templates/nginx.conf.j2
+        dest: /etc/nginx/nginx.conf
+      notify: Reload Nginx
+
+    - name: Create fastcgi_params file
+      template:
+        src: templates/fastcgi_params.j2
+        dest: /etc/nginx/fastcgi_params
+      notify: Reload Nginx
+
+    - name: Create fastcgi-php.conf snippet for Nginx
+      template:
+        src: templates/fastcgi-php.conf.j2
+        dest: /etc/nginx/snippets/fastcgi-php.conf
+      notify: Reload Nginx
+
+    - name: Test Nginx configuration
+      command: nginx -t
+      register: nginx_test
+      failed_when: nginx_test.rc != 0
+      notify: Reload Nginx
+
+    - name: Check MariaDB configuration
+      command: mariadb --version
+      register: mariadb_check
+      failed_when: mariadb_check.rc != 0
+
+    - name: Start and enable services
+      service:
+        name: "{{ item }}"
+        state: started
+        enabled: yes
+      loop:
+        - nginx
+        - mariadb
+        - "php{{ php_version }}-fpm"
+      notify:
+        - Restart Nginx
+        - Restart PHP-FPM
+        - Restart MariaDB
+
+    - name: Secure MariaDB installation and set root password
+      shell: |
+        mysql --user=root <<-EOF
+          ALTER USER 'root'@'localhost' IDENTIFIED BY '{{ root_db_password }}';
+          DELETE FROM mysql.user WHERE User='';
+          DELETE FROM mysql.user WHERE User='root' AND Host NOT IN ('localhost', '127.0.0.1', '::1');
+          DROP DATABASE IF EXISTS test;
+          DELETE FROM mysql.db WHERE Db='test' OR Db='test\_%';
+          FLUSH PRIVILEGES;
+        EOF
+      args:
+        executable: /bin/bash
+
+    - name: Start and enable services
+      service:
+        name: "{{ item }}"
+        state: started
+        enabled: yes
+      loop:
+        - nginx
+        - mariadb
+        - "php{{ php_version }}-fpm"
+      notify:
+        - Restart Nginx
+        - Restart PHP-FPM
+        - Restart MariaDB
+
+    - name: Create MariaDB database
+      community.mysql.mysql_db:
+        name: "{{ db_name }}"
+        state: present
+        login_user: root
+        login_password: "{{ root_db_password }}"
+
+    - name: Create MariaDB user
+      community.mysql.mysql_user:
+        name: "{{ db_user }}"
+        password: "{{ db_password }}"
+        priv: "{{ db_name }}.*:ALL"
+        state: present
+        login_user: root
+        login_password: "{{ root_db_password }}"
+        column_case_sensitive: false
+      notify: Restart MariaDB
+
+    - name: Download latest WordPress
+      get_url:
+        url: https://wordpress.org/latest.tar.gz
+        dest: "{{ remote_wordpress_file }}"
+
+    - name: Ensure WordPress install directory exists
+      file:
+        path: "{{ wordpress_install_dir }}"
+        state: directory
+        owner: www-data
+        group: www-data
+        mode: '0755'
+
+    - name: Extract WordPress
+      unarchive:
+        src: "{{ remote_wordpress_file }}"
+        dest: "{{ wordpress_install_dir }}"
+        remote_src: yes
+        extra_opts: [ "--strip-components=1" ]
+
+    - name: Set correct permissions
+      file:
+        path: "{{ wordpress_install_dir }}"
+        owner: www-data
+        group: www-data
+        state: directory
+        recurse: yes
+
+    - name: Configure Nginx for WordPress
+      template:
+        src: templates/nginx_wordpress.j2
+        dest: /etc/nginx/sites-available/{{ domain }}
+      notify: Reload Nginx
+
+    - name: Enable WordPress Nginx site
+      file:
+        src: /etc/nginx/sites-available/{{ domain }}
+        dest: /etc/nginx/sites-enabled/{{ domain }}
+        state: link
+      notify: Reload Nginx
+
+    - name: Remove default Nginx site
+      file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+      notify: Reload Nginx
+
+    - name: Add ubuntu user to sudoers
+      lineinfile:
+        path: /etc/sudoers
+        state: present
+        regexp: '^%sudo'
+        line: '%sudo ALL=(ALL:ALL) ALL'
+
+    - name: Create wp-config.php
+      template:
+        src: templates/wp-config.php.j2
+        dest: "{{ wordpress_install_dir }}/wp-config.php"
+        owner: www-data
+        group: www-data
+
+    - name: Set correct permissions for wp-config.php
+      file:
+        path: "{{ wordpress_install_dir }}/wp-config.php"
+        owner: www-data
+        group: www-data
+        mode: '0644'
+
+    - name: Copy PHP-FPM configuration
+      template:
+        src: templates/php.ini.j2
+        dest: /etc/php/{{ php_version }}/fpm/php.ini
+      notify: Restart PHP-FPM
+
+  handlers:
+    - name: Restart Nginx
+      service:
+        name: nginx
+        state: restarted
+
+    - name: Reload Nginx
+      service:
+        name: nginx
+        state: reloaded
+
+    - name: Restart PHP-FPM
+      service:
+        name: "php{{ php_version }}-fpm"
+        state: restarted
+
+    - name: Restart MariaDB
+      service:
+        name: mariadb
+        state: restarted

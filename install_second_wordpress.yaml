@@ -1,0 +1,145 @@
+---
+- name: Install Second WordPress Site with Nginx, MariaDB, and PHP
+  hosts: web_sites # Change for another site
+  become: yes
+
+  tasks:
+    - name: Include variables
+      include_vars:
+        file: vars.yaml
+
+    - name: Include secret variables
+      include_vars:
+        file: "{{ secret_file }}"
+
+    - name: Create MariaDB database for second site
+      community.mysql.mysql_db:
+        name: "{{ db_name }}"
+        state: present
+        login_user: root
+        login_password: "{{ root_db_password }}"
+
+    - name: Create MariaDB user for second site
+      community.mysql.mysql_user:
+        name: "{{ db_user }}"
+        password: "{{ db_password }}"
+        priv: "{{ db_name }}.*:ALL"
+        state: present
+        login_user: root
+        login_password: "{{ root_db_password }}"
+        column_case_sensitive: false
+      notify: Restart MariaDB
+
+    - name: Ensure second WordPress install directory exists
+      file:
+        path: "{{ wordpress_install_dir }}"
+        state: directory
+        owner: www-data
+        group: www-data
+        mode: '0755'
+
+    - name: Download latest WordPress
+      get_url:
+        url: https://wordpress.org/latest.tar.gz
+        dest: "{{ remote_wordpress_file }}"
+
+    - name: Extract WordPress for second site
+      unarchive:
+        src: "{{ remote_wordpress_file }}"
+        dest: "{{ wordpress_install_dir }}"
+        remote_src: yes
+        extra_opts: [ "--strip-components=1" ]
+
+    - name: Set correct permissions for second site
+      file:
+        path: "{{ wordpress_install_dir }}"
+        owner: www-data
+        group: www-data
+        state: directory
+        recurse: yes
+
+    - name: Create wp-config.php for second WordPress site
+      template:
+        src: templates/wp-config.php.j2
+        dest: "{{ wordpress_install_dir }}/wp-config.php"
+        owner: www-data
+        group: www-data
+        mode: '0644'
+
+    - name: Copy PHP-FPM configuration
+      template:
+        src: templates/php.ini.j2
+        dest: /etc/php/{{ php_version }}/fpm/php.ini
+      notify: Restart PHP-FPM
+
+    - name: Configure Nginx for second WordPress site (temporary config for Certbot)
+      template:
+        src: templates/nginx_wordpress.j2
+        dest: /etc/nginx/sites-available/{{ domain }}
+      notify: Reload Nginx
+
+    - name: Enable second WordPress Nginx site
+      file:
+        src: /etc/nginx/sites-available/{{ domain }}
+        dest: /etc/nginx/sites-enabled/{{ domain }}
+        state: link
+      notify: Reload Nginx
+
+    - name: Test Nginx configuration to ensure it's valid
+      command: nginx -t
+      register: nginx_test
+      failed_when: nginx_test.rc != 0
+      notify: Reload Nginx
+
+    - name: Install Certbot and required plugins
+      apt:
+        name:
+          - certbot
+          - python3-certbot-nginx
+        state: present
+
+    - name: Generate SSL options file
+      template:
+        src: templates/options-ssl-nginx.conf.j2
+        dest: /etc/letsencrypt/options-ssl-nginx.conf
+
+    - name: Obtain SSL certificate for second site
+      command: sudo certbot --nginx -d {{ domain }} --non-interactive --agree-tos --email {{ wordpress_admin_email }}
+      register: certbot_output
+      failed_when: certbot_output.rc != 0
+
+    - name: Print Certbot output
+      debug:
+        var: certbot_output
+
+    - name: Configure Nginx for second WordPress site (final config with SSL)
+      template:
+        src: templates/nginx_wordpress_ssl.j2
+        dest: /etc/nginx/sites-available/{{ domain }}
+      notify: Reload Nginx
+
+    - name: Test Nginx configuration to ensure it's valid after final SSL setup
+      command: nginx -t
+      register: nginx_test_final
+      failed_when: nginx_test_final.rc != 0
+      notify: Reload Nginx
+
+    - name: Reapply privileges to wpuser for the second WordPress database
+      community.mysql.mysql_user:
+        name: "{{ db_user }}"
+        priv: "{{ db_name }}.*:ALL"
+        state: present
+        login_user: root
+        login_password: "{{ root_db_password }}"
+      notify: Restart MariaDB
+
+  handlers:
+    - name: Reload Nginx
+      service:
+        name: nginx
+        state: reloaded
+
+    - name: Restart MariaDB
+      service:
+        name: mariadb
+        state: restarted

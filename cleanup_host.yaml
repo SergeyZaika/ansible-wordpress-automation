@@ -1,0 +1,109 @@
+---
+- name: Clean up host for fresh installation
+  hosts: web_sites
+  become: yes
+  vars:
+    php_version: "8.2"
+
+  tasks:
+    - name: Stop services
+      service:
+        name: "{{ item }}"
+        state: stopped
+      ignore_errors: yes
+      loop:
+        - nginx
+        - mariadb
+        - "php{{ php_version }}-fpm"
+
+    - name: Disable services
+      service:
+        name: "{{ item }}"
+        enabled: no
+      ignore_errors: yes
+      loop:
+        - nginx
+        - mariadb
+        - "php{{ php_version }}-fpm"
+
+    - name: Remove Nginx
+      apt:
+        name: nginx
+        state: absent
+        purge: yes
+
+    - name: Remove MariaDB
+      apt:
+        name: "{{ item }}"
+        state: absent
+        purge: yes
+      loop:
+        - mariadb-server
+        - mariadb-client
+        - mariadb-common
+
+    - name: Remove PHP and extensions
+      apt:
+        name: "{{ item }}"
+        state: absent
+        purge: yes
+      loop:
+        - "php{{ php_version }}"
+        - "php{{ php_version }}-fpm"
+        - "php{{ php_version }}-mysql"
+        - "php{{ php_version }}-xml"
+        - "php{{ php_version }}-mbstring"
+        - "php{{ php_version }}-curl"
+        - "php{{ php_version }}-zip"
+        - python3-certbot-nginx
+        - python3-pymysql
+
+    - name: Remove leftover PHP-FPM directories
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "/etc/php/{{ php_version }}/fpm"
+        - "/var/lib/php/fpm"
+        - "/var/log/php-fpm"
+        - "/run/php-fpm"
+
+    - name: Remove leftover directories
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/nginx
+        - /etc/mysql
+        - /var/lib/mysql
+        - /var/log/mysql
+        - /var/log/mysql.*
+        - /var/www/html
+        - /etc/php
+        - /etc/letsencrypt
+
+    - name: Autoremove APT packages
+      apt:
+        autoremove: yes
+
+    - name: Autoclean APT packages
+      apt:
+        autoclean: yes
+
+    - name: Fix broken packages
+      command: apt-get install -f
+      ignore_errors: yes
+
+    - name: Clean APT lists
+      command: apt-get clean
+      ignore_errors: yes
+
+    - name: Ensure Nginx configuration directory exists
+      file:
+        path: /etc/nginx
+        state: directory
+
+    - name: Ensure mime.types file exists
+      template:
+        src: templates/mime.types.j2
+        dest: /etc/nginx/mime.types

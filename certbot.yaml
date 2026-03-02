@@ -1,0 +1,97 @@
+---
+- name: Setup Certbot for SSL
+  hosts: web_sites #Change it for enother site 
+  become: yes
+
+  tasks:
+    - name: Include variables for the first site
+      include_vars:
+        file: vars.yaml
+
+    - name: Include secret variables
+      include_vars:
+        file: "{{ secret_file }}"
+
+    - name: Ensure services are enabled to start at boot
+      service:
+        name: "{{ item }}"
+        enabled: yes
+      loop:
+        - nginx
+        - mariadb
+        - "php{{ php_version }}-fpm"
+
+    - name: Ensure FastCGI configuration is present
+      template:
+        src: templates/fastcgi_params.j2
+        dest: /etc/nginx/fastcgi_params
+      notify: Reload Nginx
+
+    - name: Ensure fastcgi-php.conf snippet for Nginx exists
+      template:
+        src: templates/fastcgi-php.conf.j2
+        dest: /etc/nginx/snippets/fastcgi-php.conf
+      notify: Reload Nginx
+
+    - name: Create Let's Encrypt directory
+      file:
+        path: /etc/letsencrypt
+        state: directory
+        mode: '0755'
+        owner: root
+        group: root
+
+    - name: Ensure Let's Encrypt SSL options file exists
+      template:
+        src: templates/options-ssl-nginx.conf.j2
+        dest: /etc/letsencrypt/options-ssl-nginx.conf
+
+    - name: Ensure dhparams.pem file exists
+      command: openssl dhparam -out /etc/letsencrypt/ssl-dhparams.pem 2048
+      args:
+        creates: /etc/letsencrypt/ssl-dhparams.pem
+
+    - name: Configure Nginx without SSL
+      template:
+        src: templates/nginx_wordpress.j2
+        dest: /etc/nginx/sites-available/{{ domain }}
+      notify: Reload Nginx
+
+    - name: Test Nginx configuration before Certbot run
+      command: nginx -t
+      register: nginx_test
+      failed_when: nginx_test.rc != 0
+      notify: Reload Nginx
+
+    - name: Ensure Certbot Nginx plugin is installed
+      apt:
+        name: python3-certbot-nginx
+        state: present
+      notify: Reload Nginx
+
+    - name: Obtain SSL certificate using Certbot
+      command: certbot --nginx -d {{ domain }} --non-interactive --agree-tos --email {{ wordpress_admin_email }} -v
+      register: certbot_output
+      failed_when: certbot_output.rc != 0
+
+    - name: Print Certbot output
+      debug:
+        var: certbot_output
+
+    - name: Configure Nginx with SSL
+      template:
+        src: templates/nginx_wordpress_ssl.j2
+        dest: /etc/nginx/sites-available/{{ domain }}
+      notify: Reload Nginx
+
+    - name: Test Nginx configuration after Certbot run
+      command: nginx -t
+      register: nginx_test_after_certbot
+      failed_when: nginx_test_after_certbot.rc != 0
+      notify: Reload Nginx
+
+  handlers:
+    - name: Reload Nginx
+      service:
+        name: nginx
+        state: reloaded
