@@ -1,107 +1,130 @@
-# WordPress Automation with Ansible (Nginx + MariaDB + PHP)
+# Production WordPress Stack with Ansible
 
-## Architecture Overview
+## Problem
 
-This project provisions:
+Deploying production web stacks manually leads to:
 
-- Nginx
-- MariaDB
-- PHP-FPM
-- Let's Encrypt (Certbot)
-- Multi-site WordPress support
-- Backup and restore automation
+- Configuration drift between environments
+- Inconsistent server state after partial failures
+- No repeatable path for disaster recovery
+- Credentials embedded in configuration files
 
-## Idempotency & Design
+## Solution
 
-This project follows idempotent Ansible practices.
-- No hardcoded secrets in repository
-- Secrets are passed via `-e "secret_file=..."`
-- Playbooks are safe to re-run
-- Environment-specific data is externalized
+This repository demonstrates a fully automated, idempotent deployment of a production
+WordPress stack using Ansible. A single command provisions a server from bare Ubuntu to a
+running, TLS-secured, multi-site WordPress installation — and the same command is safe to
+re-run on an already-configured server without side effects.
 
-This repository contains Ansible playbooks and templates to set up one or more WordPress sites on an Ubuntu server using Nginx, MariaDB, and PHP. Additionally, it includes a playbook for cleaning up the environment if you need to reinstall, as well as a backup playbook.
+## Stack
+
+| Component             | Role                                                    |
+|-----------------------|---------------------------------------------------------|
+| Nginx                 | Reverse proxy, static file serving, TLS termination     |
+| PHP-FPM 8.2           | Application server via Unix socket                      |
+| MariaDB               | Database with hardened installation                     |
+| Let's Encrypt/Certbot | Automated TLS certificate provisioning                  |
+| systemd               | Service lifecycle management with boot persistence      |
+| Ansible Vault         | Secret management — no credentials in repository        |
+
+## Design Decisions
+
+**Runtime secret injection** — credentials are never stored in the repository. Secrets are
+passed at runtime via `-e "secret_file=..."` and can be encrypted with Ansible Vault. The
+repository contains only a documented example file with placeholder values.
+
+**Idempotent tasks with `creates:`** — slow one-time operations (DH parameter generation,
+certificate issuance) use `creates:` to skip execution if output already exists. Re-running
+any playbook on a configured server produces no unintended changes.
+
+**Nginx config validation before reload** — every config change is preceded by `nginx -t`.
+In `certbot.yaml` this runs both before Certbot executes and after the SSL vhost is deployed,
+preventing a broken configuration from ever being applied to a live server.
+
+**MariaDB hardening in code** — `install_wordpress.yaml` runs the equivalent of
+`mysql_secure_installation` as an Ansible task: removes anonymous users, drops the test
+database, and restricts root login to localhost. Security posture is defined in source
+control, not applied manually post-deploy.
+
+**Timestamped backups** — backup filenames include a full timestamp
+(`domain-fs-YYYY-MM-DD_HH-MM-SS.tar.gz`), so each run produces a new archive. No previous
+backup is overwritten by a subsequent run.
+
+**Backup pull to controller** — backups are transferred to the Ansible control machine via
+`rsync` and `fetch`, not left on the target server. Loss of the server does not mean loss of
+the backup.
+
+**Pre-restore validation** — `deploy_wordpress_from_backup.yaml` checks that both the
+files archive and the database dump exist and that extraction produced a valid WordPress
+installation before touching the database. The playbook fails fast rather than leaving the
+server in a half-restored state.
+
+## Playbook Reference
+
+| Playbook                               | Purpose                                              |
+|----------------------------------------|------------------------------------------------------|
+| `install_wordpress.yaml`               | Full stack provisioning (Nginx + PHP-FPM + MariaDB + WordPress) |
+| `certbot.yaml`                         | TLS certificate provisioning and Nginx SSL configuration |
+| `install_second_wordpress.yaml`        | Add a second isolated WordPress site                 |
+| `backup_wordpress.yaml`                | Backup files + database, pull to control machine     |
+| `deploy_wordpress_from_backup.yaml`    | Restore a site from backup                           |
+| `deploy_second_wordpress_from_backup.yaml` | Restore second site from backup                 |
+| `cleanup_host.yaml`                    | Full teardown for reinstallation                     |
 
 ## Requirements
 
-- Ansible installed on your control machine
-- Ubuntu server(s) with SSH access
-- Open ports: 80 (HTTP), 443 (HTTPS) for web traffic
-- Basic knowledge of Ansible and server configuration
+- Ansible ≥ 2.10 with `community.mysql` collection installed
+- Ubuntu 22.04 server with SSH access
+- Ports 80 and 443 open on the target host
 
 ## Variables
 
-### General Variables (`vars.yaml`)
+### `vars.yaml`
 
-- `ubuntu_user`: The username for your Ubuntu server (default: ubuntu).
-- `php_version`: Version of PHP to be installed (e.g., "8.2").
-- `backup_dir`: Directory to store backup files on the remote host.
+| Variable      | Default                    | Description                |
+|---------------|----------------------------|----------------------------|
+| `php_version` | `8.2`                      | PHP version to install     |
+| `backup_dir`  | `/var/backups/wordpress`   | Remote backup directory    |
+| `ubuntu_user` | `ubuntu`                   | Server username            |
 
-### Secret Variables
+### Secrets (`vars_secret_example.yaml`)
 
-All sensitive data is stored in a single secrets file passed at runtime via `-e "secret_file=..."`.
-
-Create your own file based on `vars_secret_example.yaml`:
+All sensitive values are passed at runtime. Create your own file based on the example:
 
 ```yaml
 domain: "example.com"
 db_name: "example_db"
-wordpress_install_dir: "/var/www/html/example"
-
 db_user: "example_user"
 db_password: "change_me"
 root_db_password: "change_me"
 
+wordpress_install_dir: "/var/www/html/example"
 wordpress_admin_email: "admin@example.com"
 
+# Used only for restore playbooks
 wordpress_files_backup: "example-files-backup.tar.gz"
-wordpress_db_backup: "example-db-backup.sql"
+wordpress_db_backup:    "example-db-backup.sql"
 ```
 
 ## Usage
 
-### Install the First WordPress Site
-
 ```bash
+# 1. Provision full stack
 ansible-playbook -i hosts install_wordpress.yaml \
   -e "secret_file=vars_secret.yaml" \
   --vault-password-file ~/.vault_pass.txt
-```
 
-This playbook sets up the first WordPress site at the specified domain. It installs Nginx, MariaDB, PHP, and configures the server.
-
-### Obtain SSL Certificates
-
-```bash
+# 2. Obtain TLS certificate
 ansible-playbook -i hosts certbot.yaml \
   -e "secret_file=vars_secret.yaml" \
   --vault-password-file ~/.vault_pass.txt
-```
 
-This playbook uses Certbot to obtain and install an SSL certificate for your WordPress site.
-
-### Install the Second WordPress Site
-
-```bash
-ansible-playbook -i hosts install_second_wordpress.yaml \
-  -e "secret_file=vars_secret.yaml" \
-  --vault-password-file ~/.vault_pass.txt
-```
-
-This playbook sets up a second WordPress site with its own database and user credentials, without interfering with the first site.
-
-### Create a Backup of the WordPress Site
-
-```bash
+# 3. Backup
 ansible-playbook -i hosts backup_wordpress.yaml \
   -e "secret_file=vars_secret.yaml" \
   --vault-password-file ~/.vault_pass.txt
-```
 
-This playbook will backup both the WordPress files and database for the site specified in the secrets file and store the backups on the Ansible host.
-
-### Restore WordPress from Backup
-
-```bash
+# 4. Restore to a new server
 ansible-playbook -i hosts deploy_wordpress_from_backup.yaml \
   -e "secret_file=vars_secret.yaml" \
   --vault-password-file ~/.vault_pass.txt
@@ -111,102 +134,27 @@ ansible-playbook -i hosts certbot.yaml \
   --vault-password-file ~/.vault_pass.txt
 ```
 
-### Restore Second WordPress Site from Backup
+## Repository Structure
 
-```bash
-ansible-playbook -i hosts deploy_second_wordpress_from_backup.yaml \
-  -e "secret_file=vars_secret.yaml" \
-  --vault-password-file ~/.vault_pass.txt
 ```
-
-### Clean Up the Host for Reinstallation
-
-```bash
-ansible-playbook -i hosts cleanup_host.yaml \
-  -e "secret_file=vars_secret.yaml" \
-  --vault-password-file ~/.vault_pass.txt
-```
-
-This playbook stops and removes all installed services (Nginx, MariaDB, PHP), and deletes configuration and data files, returning the server to a clean state.
-
-## Templates Explanation
-
-- `fastcgi-php.conf.j2`: Configuration snippet for handling PHP requests in Nginx.
-- `fastcgi_params.j2`: Defines parameters for FastCGI processes.
-- `mime.types.j2`: Provides MIME type mappings for Nginx.
-- `nginx.conf.j2`: Basic configuration file for Nginx.
-- `nginx_wordpress.j2`: Nginx configuration for serving the first WordPress site (HTTP only).
-- `nginx_wordpress_ssl.j2`: Nginx configuration for serving the first WordPress site with SSL.
-- `nginx_wordpress_ssl_second.j2`: Nginx configuration for serving the second WordPress site with SSL.
-- `wp-config.php.j2`: The main configuration file for WordPress, customized for the first site.
-- `wp-config_second.j2`: Configuration file for the second WordPress site.
-
-## Example Workflow
-
-Install the first WordPress site:
-
-```bash
-ansible-playbook -i hosts install_wordpress.yaml \
-  -e "secret_file=vars_secret.yaml" \
-  --vault-password-file ~/.vault_pass.txt
-```
-
-Obtain an SSL certificate:
-
-```bash
-ansible-playbook -i hosts certbot.yaml \
-  -e "secret_file=vars_secret.yaml" \
-  --vault-password-file ~/.vault_pass.txt
-```
-
-Install the second WordPress site:
-
-```bash
-ansible-playbook -i hosts install_second_wordpress.yaml \
-  -e "secret_file=vars_secret.yaml" \
-  --vault-password-file ~/.vault_pass.txt
-```
-
-Create a backup:
-
-```bash
-ansible-playbook -i hosts backup_wordpress.yaml \
-  -e "secret_file=vars_secret.yaml" \
-  --vault-password-file ~/.vault_pass.txt
-```
-
-Restore from backup:
-
-```bash
-ansible-playbook -i hosts deploy_wordpress_from_backup.yaml \
-  -e "secret_file=vars_secret.yaml" \
-  --vault-password-file ~/.vault_pass.txt
-
-ansible-playbook -i hosts certbot.yaml \
-  -e "secret_file=vars_secret.yaml" \
-  --vault-password-file ~/.vault_pass.txt
-```
-
-Clean up the host:
-
-```bash
-ansible-playbook -i hosts cleanup_host.yaml \
-  -e "secret_file=vars_secret.yaml" \
-  --vault-password-file ~/.vault_pass.txt
-```
-
-## Secrets
-
-This repository does not contain real secrets.
-
-Create your own secret variables file based on:
-
-`vars_secret_example.yaml`
-
-Run playbooks like this:
-
-```bash
-ansible-playbook install_wordpress.yaml \
-  -e "secret_file=vars_secret.yaml" \
-  --vault-password-file ~/.vault_pass.txt
+.
+├── install_wordpress.yaml              # Main provisioning playbook
+├── certbot.yaml                        # TLS automation
+├── install_second_wordpress.yaml       # Multi-site extension
+├── backup_wordpress.yaml               # Backup + pull to control machine
+├── deploy_wordpress_from_backup.yaml   # Restore from backup
+├── cleanup_host.yaml                   # Full teardown
+├── vars.yaml                           # Non-secret variables
+├── vars_secret_example.yaml            # Secret variable template
+├── hosts.example                       # Inventory example
+└── templates/
+    ├── nginx.conf.j2                   # Base Nginx configuration
+    ├── nginx_wordpress.j2              # HTTP vhost (pre-SSL)
+    ├── nginx_wordpress_ssl.j2          # HTTPS vhost with redirect
+    ├── options-ssl-nginx.conf.j2       # TLS protocol and cipher configuration
+    ├── wp-config.php.j2                # WordPress configuration
+    ├── fastcgi-php.conf.j2             # FastCGI PHP handler snippet
+    ├── fastcgi_params.j2               # FastCGI parameters
+    ├── php.ini.j2                      # PHP-FPM tuning
+    └── mime.types.j2                   # MIME type mappings
 ```

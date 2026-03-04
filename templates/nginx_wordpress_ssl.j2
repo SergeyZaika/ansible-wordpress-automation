@@ -5,7 +5,7 @@ server {
 }
 
 server {
-    listen 443;
+    listen 443 ssl;
     server_name www.{{ domain }};
     return 301 https://{{ domain }}$request_uri; # Redirect 
 
